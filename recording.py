@@ -433,6 +433,14 @@ def _inspect_open_file(file, require_complete=True, max_wall_gap_s=.2):
     timing = _timing_report(file, max_wall_gap_s)["timing"]
     raw_metadata = file["metadata/json"][()]
     source = json.loads(raw_metadata.decode() if isinstance(raw_metadata, bytes) else raw_metadata)
+    if source.get("require_dual_controller_input"):
+        assert missing_input_count == 0, "Physical recording contains missing controller input"
+        for index in np.flatnonzero(action_valid):
+            raw_packet = file["teleop/input_json"][index]
+            packet = json.loads(raw_packet.decode() if isinstance(raw_packet, bytes) else raw_packet)
+            assert (isinstance(packet, dict) and
+                    set(packet.get("hands", {})) == {"left", "right"}), (
+                "Physical recording requires both leader arms on every transition")
     return {"frames": count, "cameras": list(CAMERAS),
             "success": bool(file.attrs["success"]), "alignment": "verified",
             "quality_pass": True, "timing": timing,

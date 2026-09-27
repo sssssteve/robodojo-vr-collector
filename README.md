@@ -4,7 +4,7 @@
 
 Browser-based WebXR teleoperation and demonstration collection for RoboDojo bimanual simulation.
 
-The workstation runs Isaac Sim, RoboDojo, control, rendering, and HDF5 recording. A VR headset sends controller poses through the browser; the desktop provides a read-only spectator view.
+The workstation runs Isaac Sim, RoboDojo, control, rendering, and HDF5 recording. Input comes from either WebXR controllers or a receive-only dual Piper leader-arm CAN interface; the desktop provides monitoring and mode controls.
 
 > Research tool, not a general product release. Current validation does not cover every task, headset, or real robot. See [VALIDATION.md](VALIDATION.md).
 
@@ -88,6 +88,13 @@ Runtime tokens, logs, PID files, TLS material, scene state, external assets, and
 ## Updates
 
 Every code, configuration, or documentation change must update this section with the date, specific changes, verification performed, and remaining limitations.
+
+### 2026-09-27 · Dual leader-arm and top-view update
+
+- Added mutually exclusive VR and dual Piper leader-arm control modes, receive-only `can0`/`can1` input, desktop keyboard recording controls, and strict dual-input checks for physical recordings.
+- Added a separate top-camera spectator stream and synchronized conveyor surface/graph motion with the recording gate while preserving the existing per-hand tracking safety behavior.
+- Verification: 51 CPU/protocol tests passed in an isolated Piper-side copy; Python compilation plus JavaScript and Shell syntax checks passed.
+- Remaining limitation: Isaac Sim, real CAN hardware, and end-to-end headset collection were not restarted for this update.
 
 ### 2026-09-26 · Tracking and spectator update
 

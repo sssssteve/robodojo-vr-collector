@@ -42,12 +42,47 @@ class RoboDojo:
         # Keep Kit's internal render loop from rate-limiting that call to 25 Hz.
         cfg.sim.render_interval = 1
         cfg.camera.default_frequency = 25
+        cfg.camera.cam_top = {"camera": {"type": "third_view", "mesh": "pinhole",
+                                         "pos": [0.0, -0.05, 2.4], "ori": [0.0, 0.0, 0.0]}}
         _, task_class = load_task_class(task)
         self.phase_callback("initialize_env_enter", task=task)
         self.env = task_class(cfg, app)
         self.phase_callback("initialize_env_exit", task=task)
         self.cfg = cfg
         self.log = logging.getLogger("robodojo_pico")
+        self.conveyor_surface = None
+        self.conveyor_node_enabled = None
+        self.top_frame = None
+        if task in {"match_and_pick_from_conveyor", "pick_from_conveyor_by_image"}:
+            from pxr import PhysxSchema, UsdShade
+
+            reload_env_scene = self.env.scene_manager.reload_env_scene
+
+            def reload_with_conveyor(env_id):
+                reload_env_scene(env_id)
+                self.conveyor_surface = None
+                self.conveyor_node_enabled = None
+                for obj in self.env.scene_manager.get_objects([env_id], object_type="dynamic").values():
+                    if getattr(obj, "category_name", None) != "conveyor":
+                        continue
+                    belt = obj.stage.GetPrimAtPath(obj.usd_prim_path + "/ConveyorTrack/Belt")
+                    if belt.IsValid():
+                        material = obj.stage.GetPrimAtPath(
+                            obj.usd_prim_path + "/ConveyorTrack/Physics_materials/ConveyorBelt_Mat")
+                        UsdShade.MaterialBindingAPI.Apply(belt).Bind(
+                            UsdShade.Material(material), materialPurpose="physics")
+                        self.conveyor_surface = PhysxSchema.PhysxSurfaceVelocityAPI.Apply(belt)
+                        self.conveyor_surface.GetSurfaceVelocityEnabledAttr().Set(False)
+                        graph = obj.stage.GetPrimAtPath(obj.usd_prim_path + "/ConveyorTrack/ConveyorBeltGraph")
+                        velocity = graph.GetAttribute("graph:variable:Velocity")
+                        velocity.Set(abs(velocity.Get()))
+                        node = obj.stage.GetPrimAtPath(str(graph.GetPath()) + "/ConveyorNode")
+                        self.conveyor_node_enabled = node.GetAttribute("inputs:enabled")
+                        self.conveyor_node_enabled.Set(False)
+                if self.conveyor_surface is None:
+                    raise RuntimeError("Conveyor belt surface is missing")
+
+            self.env.scene_manager.reload_env_scene = reload_with_conveyor
         manager = self.env.scene_manager.layout_manager
         get_pose = manager.get_instance_pose
 
@@ -135,6 +170,14 @@ class RoboDojo:
     def joints(self, side):
         return np.asarray(self.env.robot_manager.get_joint(self.robots[side], [0])[0]).copy()
 
+    def set_task_motion_enabled(self, enabled):
+        if self.conveyor_surface is not None:
+            if self.conveyor_node_enabled.Get() != enabled:
+                self.conveyor_node_enabled.Set(enabled)
+            attr = self.conveyor_surface.GetSurfaceVelocityEnabledAttr()
+            if attr.Get() != enabled:
+                attr.Set(enabled)
+
     def poses(self):
         return {s: self.env.robot_manager.get_real_endpose(r, [0])[0].copy()
                 for s, r in self.robots.items()}
@@ -170,6 +213,7 @@ class RoboDojo:
         result["render_stamp"] = delivered
         if not all(c in result["vision"] for c in CAMERAS):
             raise RuntimeError("Missing required camera")
+        self.top_frame = result["vision"]["cam_top"]["color"]
         result["vision"] = {c: result["vision"][c] for c in CAMERAS}
         state = {}
         for side, robot in self.robots.items():

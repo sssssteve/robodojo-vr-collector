@@ -4,7 +4,7 @@
 
 面向 RoboDojo 双臂仿真的浏览器 WebXR 遥操作与示范数据采集工具。
 
-工作站负责运行 Isaac Sim、RoboDojo、控制、渲染和 HDF5 录制；VR 头显通过浏览器发送手柄位姿，电脑提供只读监看页面。
+工作站负责运行 Isaac Sim、RoboDojo、控制、渲染和 HDF5 录制；输入可选择 WebXR 手柄或只读 CAN 的 Piper 实体双主臂，电脑页面负责监看和模式控制。
 
 > 本项目是研究与内部数采工具，不是通用产品。当前验证尚未覆盖全部任务、头显或真实机器人，详见 [VALIDATION.md](VALIDATION.md)。
 
@@ -88,6 +88,13 @@ python export_official_hdf5.py data/episode_xxx.hdf5 data/episode_xxx_official.h
 ## 更新记录
 
 每次修改代码、配置或文档，都必须在这里记录日期、具体改动、实际验证以及仍未验证的内容。
+
+### 2026-09-27 · 实体双主臂与顶视角更新
+
+- 增加互斥的 VR 与 Piper 实体双主臂模式、只读 `can0`/`can1` 输入、电脑键盘录制控制，以及实体录制的双侧输入完整性检查。
+- 增加独立顶视相机监看流，并让传送带 surface/graph 与录制门控同步启停，同时保留已有的单手追踪安全逻辑。
+- 验证：候选版本在 Piper 独立目录通过 51 个 CPU/协议测试，并通过 Python 编译、JavaScript 与 Shell 语法检查。
+- 剩余边界：本次未重启 Isaac Sim，未连接真实 CAN 主臂，也未执行头显端到端采集。
 
 ### 2026-09-26 · 追踪与监看更新
 

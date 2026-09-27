@@ -17,6 +17,8 @@
 #fullscreen-recording[data-state="recording"]{background:#a92f2fee;border-color:#df5c5c;animation:pulse 1.2s infinite}
 #fullscreen-recording[data-state="error"]{background:#9a6700;border-color:#d9a52c}
 #viewport:fullscreen{width:100vw;height:100vh;border-radius:0;background:#050a0f}#viewport:fullscreen #fullscreen-hud{display:flex}#viewport:fullscreen #preview{width:100vw;height:100vh}
+#top-observer{position:absolute;z-index:2;top:12px;left:12px;width:25%;height:auto;aspect-ratio:4/3;background:#080e15;border:1px solid #41647c;border-radius:6px}
+#top-label{position:absolute;z-index:3;top:17px;left:20px;padding:2px 6px;background:#040c14bb;font-size:13px}
 #menu{position:absolute;inset:6% 12%;padding:24px 28px;background:#040c14ee;border:1px solid #41647c;border-radius:14px;box-shadow:0 8px 36px #000b;overflow:auto}
 #menu[hidden]{display:none}#menu h2{margin:0 0 14px;color:#73e5b3;font-size:28px}#menu-body{color:#d7e3ec;white-space:pre-wrap;margin-bottom:12px}
 #menu-items{list-style:none;margin:0;padding:0;display:grid;gap:8px}#menu-items li{padding:10px 14px;border-radius:7px;background:#ffffff0f;font-size:20px}#menu-items li.selected{background:#247d66;color:white}#menu-help{margin:14px 0 0;color:#aebdca;font-size:14px}
@@ -30,6 +32,9 @@
 #quality-reasons{margin:10px 0 0;padding-left:20px;color:#c9d8e3;font-size:14px;line-height:1.45}#quality-reasons:empty{display:none}
 .note{margin:9px 0 0;color:#8299aa;font-size:12px}
 #success-text{margin:0;color:#e4edf4;line-height:1.55;font-size:15px}
+#leader-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}#leader-actions button{padding:8px 12px;border:1px solid #58758a;border-radius:7px;background:#204458;color:#fff;font:600 14px system-ui;cursor:pointer}#leader-actions button:disabled{opacity:.5;cursor:default}
+#leader-state{margin:9px 0 0;color:#c9d8e3;font-size:14px;line-height:1.4}
+#shortcut-state{margin:8px 0 0;color:#c9d8e3;font-size:13px}
 #recent-list{list-style:none;margin:0;padding:0;display:grid;gap:7px}.recent-item{display:grid;grid-template-columns:1fr auto;gap:8px;padding:8px 10px;border-radius:7px;background:#ffffff0a;font-size:13px}
 .recent-item b{font-size:14px}.recent-ok{color:#73e5b3}.recent-fail{color:#ffcb69}.empty{color:#8299aa;font-size:14px}
 #technical summary{cursor:pointer;color:#8fb4ca;font-weight:700}#status{margin:10px 0 0;color:#a9dacc;white-space:pre-wrap;line-height:1.55;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -48,10 +53,11 @@
   </div>
   <div class="prompt" id="prompt">等待任务 Prompt…</div>
   <div id="workspace">
-    <div id="viewport"><canvas id="preview" width="1280" height="720"></canvas>
+    <div id="viewport"><canvas id="preview" width="1280" height="720"></canvas><canvas id="top-observer" width="320" height="240"></canvas><span id="top-label">桌面顶视 · 等待画面</span>
       <button id="fullscreen-button" type="button" aria-label="全屏显示仿真视角">⛶ 全屏仿真视角</button>
       <div id="fullscreen-hud" aria-live="polite">
         <span class="fullscreen-chip" id="fullscreen-recording" data-state="idle">○ 未录制</span>
+        <span class="fullscreen-chip" id="fullscreen-mode">控制入口：未选择</span>
         <span class="fullscreen-chip" id="fullscreen-phase">运行状态：连接中</span>
         <span class="fullscreen-chip" id="fullscreen-task-count">当前任务已验收：0 条</span>
         <span class="fullscreen-chip" id="fullscreen-total-count">全部已验收：0 条</span>
@@ -59,6 +65,8 @@
       <section id="menu" hidden aria-live="polite"><h2 id="menu-title"></h2><div id="menu-body"></div><ol id="menu-items"></ol><p id="menu-help">摇杆上下选择 · 扳机确认 · B 返回 · 按下摇杆关闭菜单</p></section>
     </div>
     <aside id="details">
+      <section class="panel"><h2>控制入口</h2><p class="note">两种模式互斥；录制中不能切换。实体双主臂只读 can0 左 / can1 右；切换前请结束当前动作。</p><div id="leader-actions"><button id="vr-mode" type="button">选择 VR 双手柄</button><button id="leader-start" type="button">选择实体双主臂</button><button id="leader-stop" type="button" disabled>停止输入</button></div><p id="leader-state" aria-live="polite">未选择控制入口</p></section>
+      <section class="panel"><h2>实体双主臂键盘</h2><p class="note">仅实体模式生效：Q 菜单，↑/↓ 选择，空格确认或开始/保存录制，Esc 菜单返回或直接丢弃当前录制，R 重置场景，E 双臂归位。VR 手柄按键保持原样。</p><p id="shortcut-state" aria-live="polite">等待运行状态</p></section>
       <section class="panel" id="quality-panel" data-level="ok">
         <div class="panel-head"><h2>本轮质量</h2><span id="quality-badge">等待数据</span></div>
         <div class="quality-grid">

@@ -12,6 +12,7 @@ import time
 from aiohttp import web
 
 from control import validate_packet
+from leader_can import LeaderCan
 from recording import episode_frame, list_episodes
 
 
@@ -48,6 +49,9 @@ class Bridge:
         self.image = None
         self.image_seq = 0
         self.image_published = 0.
+        self.observer_image = None
+        self.observer_seq = 0
+        self.observer_published = 0.
         self.status = {"phase": "starting", "frames": 0, "env_epoch": env_epoch}
         self.catalog = {}
         self.clients = {}
@@ -70,6 +74,33 @@ class Bridge:
         self.progress_path = Path(progress_path) if progress_path else None
         self.vr_ui = {"open": False}
         self.vr_ui_session_id = None
+        self.leader = None
+        self.control_mode = "unselected"
+
+    def select_mode(self, mode):
+        if mode not in ("unselected", "vr", "leader"):
+            raise ValueError("未知输入模式")
+        with self.lock:
+            if self.status.get("phase") == "recording":
+                return False, "请先保存或丢弃当前录制，再切换输入模式"
+            if self.control_mode == mode:
+                return True, None
+            self.control_mode = mode
+            self.owner = None
+            self.owner_source = None
+            self.owner_session_id = None
+            self.packet = None
+            self.received = 0.
+            self.last_tracking = {"left": False, "right": False}
+            self.vr_ui = {"open": False}
+            self.vr_ui_session_id = None
+            if len(self.commands) < MAX_COMMANDS:
+                self.commands.append({"name": "pause"})
+            return True, None
+
+    def _source_allowed(self, source):
+        return ((self.control_mode == "vr" and source in ("webxr", "desktop-debug")) or
+                (self.control_mode == "leader" and source == "leader-can"))
 
     def snapshot(self):
         with self.lock:
@@ -95,6 +126,7 @@ class Bridge:
             else:
                 input_state = "fresh"
             diagnostics = {
+                "control_mode": self.control_mode,
                 "session_id": self.session_id,
                 "connected": self.input_connected,
                 "client_count": len(self.clients),
@@ -121,7 +153,7 @@ class Bridge:
             session_id = self.session_id
             self.clients[ws] = {"session_id": session_id, "source": source}
             self.input_connected = True
-            if takeover:
+            if takeover and self._source_allowed(source):
                 self._activate_input_locked(ws)
             return session_id
 
@@ -145,7 +177,8 @@ class Bridge:
 
     def accept_packet(self, ws, packet):
         with self.lock:
-            if ws not in self.clients or packet.get("env_epoch") != self.env_epoch:
+            if (ws not in self.clients or packet.get("env_epoch") != self.env_epoch or
+                    not self._source_allowed(self.clients[ws]["source"])):
                 return False
             now = time.monotonic()
             owner_age = now - (self.received or self.owner_since) if self.owner is not None else None
@@ -168,7 +201,7 @@ class Bridge:
     def update_vr_ui(self, ws, state):
         with self.lock:
             client = self.clients.get(ws)
-            if client is None or client["source"] != "webxr":
+            if client is None or client["source"] != "webxr" or self.control_mode != "vr":
                 return False
             if self.owner not in (None, ws):
                 return False
@@ -190,6 +223,12 @@ class Bridge:
             self.vr_ui = ui
             self.vr_ui_session_id = client["session_id"]
             return True
+
+    def command_source_allowed(self, ws):
+        with self.lock:
+            client = self.clients.get(ws)
+            return bool(client and self._source_allowed(client["source"]) and
+                        self.owner in (None, ws))
 
     def unregister_input(self, ws):
         with self.lock:
@@ -216,8 +255,20 @@ class Bridge:
         with self.lock:
             self.applied_seq = packet["seq"]
 
-    def submit_command(self, name, value=None):
+    def submit_command(self, name, value=None, physical=False):
         with self.lock:
+            if physical and (self.control_mode != "leader" or name not in
+                             ("physical_record_toggle", "discard", "reset", "home",
+                              "select_task", "next_scene", "set_random_scene")):
+                return {"accepted": False, "command": name, "error": "请先选择实体双主臂模式"}
+            if name == "physical_record_toggle" and not physical:
+                return {"accepted": False, "command": name, "error": "该命令仅限实体双主臂键盘"}
+            if name in ("record", "record_recovery") and self.control_mode == "unselected":
+                return {"accepted": False, "command": name,
+                        "error": "请先选择 VR 或实体双主臂输入模式"}
+            if name in ("record", "record_recovery") and self.control_mode == "leader":
+                return {"accepted": False, "command": name,
+                        "error": "实体双主臂模式暂仅用于仿真联调，不可录制训练数据"}
             if name in LIFECYCLE_COMMANDS:
                 if self.pending_operation is not None:
                     response = {"accepted": False, "command": name,
@@ -292,15 +343,29 @@ class Bridge:
             self.image_seq += 1
             self.image_published = time.monotonic()
 
+    def publish_observer(self, image):
+        with self.lock:
+            self.observer_image = image
+            self.observer_seq += 1
+            self.observer_published = time.monotonic()
+
     def reset_epoch(self, env_epoch):
         with self.lock:
             self.env_epoch = int(env_epoch)
+            if self.control_mode == "leader":
+                self.control_mode = "unselected"
+                self.owner = None
+                self.owner_source = None
+                self.owner_session_id = None
             self.packet = None
             self.received = 0.
             self.commands.clear()
             self.image = None
             self.image_published = 0.
             self.image_seq += 1
+            self.observer_image = None
+            self.observer_published = 0.
+            self.observer_seq += 1
             self.last_seq = -1
             self.received_seq = -1
             self.applied_seq = -1
@@ -313,6 +378,8 @@ class Bridge:
 
 def create_app(bridge, token, output=None):
     app = web.Application(client_max_size=32768)
+    leader = LeaderCan(bridge)
+    bridge.leader = leader
     root = Path(__file__).parent / "web"
     output = Path(output).resolve() if output is not None else None
 
@@ -332,11 +399,18 @@ def create_app(bridge, token, output=None):
             raise web.HTTPUnauthorized()
         with bridge.lock:
             current = dict(bridge.status)
+            current["control_mode"] = bridge.control_mode
+            current["leader_can"] = leader.status()
             current["vr_ui"] = deepcopy(bridge.vr_ui)
             current["preview_transport"] = {
                 "frame_seq": bridge.image_seq,
                 "age_ms": None if not bridge.image_published else
                 round((time.monotonic() - bridge.image_published) * 1000, 1),
+            }
+            current["observer_transport"] = {
+                "frame_seq": bridge.observer_seq,
+                "age_ms": None if not bridge.observer_published else
+                round((time.monotonic() - bridge.observer_published) * 1000, 1),
             }
         if bridge.progress_path is not None:
             try:
@@ -365,6 +439,41 @@ def create_app(bridge, token, output=None):
             raise web.HTTPBadRequest(text="操作参数无效") from None
         response = bridge.submit_command(name, value)
         return web.json_response(response, status=202 if response["accepted"] else 409)
+
+    async def physical_command(request):
+        if not authorized(request):
+            raise web.HTTPUnauthorized()
+        try:
+            payload = await request.json()
+            name = payload.get("command")
+            if name == "physical_record_toggle":
+                value = None
+            else:
+                name, value = parse_command(payload)
+        except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
+            raise web.HTTPBadRequest(text="操作参数无效") from None
+        response = bridge.submit_command(name, value, physical=True)
+        return web.json_response(response, status=202 if response["accepted"] else 409)
+
+    async def mode_command(request):
+        if not authorized(request):
+            raise web.HTTPUnauthorized()
+        try:
+            mode = (await request.json()).get("mode")
+        except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
+            raise web.HTTPBadRequest(text="操作参数无效") from None
+        if mode not in ("unselected", "vr", "leader"):
+            raise web.HTTPBadRequest(text="操作参数无效")
+        accepted, error = bridge.select_mode(mode)
+        if accepted and mode == "leader":
+            accepted, error = leader.start()
+            if not accepted:
+                bridge.select_mode("unselected")
+        elif accepted:
+            leader.stop()
+        return web.json_response({"accepted": accepted, "error": error, "mode": bridge.control_mode,
+                                  "leader_can": leader.status()},
+                                 status=202 if accepted else 409)
 
     async def frame(request):
         if not authorized(request) or output is None:
@@ -397,7 +506,10 @@ def create_app(bridge, token, output=None):
                         await ws.send_json({"type": "pong", "client_ms": obj.get("client_ms")})
                     elif obj.get("type") == "command":
                         name, value = parse_command(obj)
-                        response = bridge.submit_command(name, value)
+                        response = (bridge.submit_command(name, value)
+                                    if bridge.command_source_allowed(ws) else
+                                    {"accepted": False, "command": name,
+                                     "error": "当前页面不是已选控制入口，请先切换模式"})
                         await ws.send_json(response)
                     elif obj.get("type") == "ui_state":
                         bridge.update_vr_ui(ws, obj)
@@ -429,6 +541,8 @@ def create_app(bridge, token, output=None):
                 with bridge.lock:
                     image, current, sequence = bridge.image, dict(bridge.status), bridge.image_seq
                     current["vr_ui"] = deepcopy(bridge.vr_ui)
+                    current["control_mode"] = bridge.control_mode
+                    current["leader_can"] = leader.status()
                     current["preview_transport"] = {
                         "frame_seq": sequence,
                         "age_ms": None if not bridge.image_published else
@@ -448,6 +562,28 @@ def create_app(bridge, token, output=None):
             pass
         return ws
 
+    async def observer_socket(request):
+        if not authorized(request):
+            raise web.HTTPUnauthorized()
+        ws = web.WebSocketResponse(max_msg_size=1024)
+        await ws.prepare(request)
+        last_sent = -1
+        try:
+            while not ws.closed:
+                with bridge.lock:
+                    image, sequence = bridge.observer_image, bridge.observer_seq
+                if image is not None and sequence != last_sent:
+                    await ws.send_bytes(image)
+                    last_sent = sequence
+                else:
+                    try:
+                        await ws.receive(timeout=.01)
+                    except asyncio.TimeoutError:
+                        pass
+        except (ConnectionError, ConnectionResetError, RuntimeError, asyncio.CancelledError):
+            pass
+        return ws
+
     app.router.add_get("/", static)
     app.router.add_get("/client.js", static)
     app.router.add_get("/spectator", static)
@@ -457,9 +593,15 @@ def create_app(bridge, token, output=None):
     app.router.add_get("/episodes", episodes)
     app.router.add_get("/catalog", catalog)
     app.router.add_post("/command", command)
+    app.router.add_post("/physical-command", physical_command)
+    app.router.add_post("/mode", mode_command)
     app.router.add_get("/episode/{name}/frame", frame)
     app.router.add_get("/input", input_socket)
     app.router.add_get("/video", video_socket)
+    app.router.add_get("/observer", observer_socket)
+    async def stop_leader(_app):
+        leader.stop()
+    app.on_cleanup.append(stop_leader)
     return app
 
 

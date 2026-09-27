@@ -21,6 +21,7 @@ let panelDirty = true, panelWarning = '';
 let lastEnvEpoch = null, poseDroppedBuffered = 0;
 let menuSyncSupported = false;
 let debugMode = false, debugAnimation = 0, debugLastTime = 0, debugSelected = 'left';
+let vrSelected = false;
 let pendingDebugStart = false;
 const debugKeys = new Set();
 const debugHands = {
@@ -32,6 +33,16 @@ banner.width = 1024; banner.height = 880;
 const context = banner.getContext('2d');
 
 function show(text) { statusElement.textContent = text; }
+async function selectMode(mode) {
+  try {
+    const response = await fetch(`/mode?token=${encodeURIComponent(token)}`, {
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+    const result = await response.json();
+    if (result.accepted) return true;
+    show(`无法切换控制入口：${result.error || response.status}`);
+  } catch (error) { show(`控制入口连接失败：${error.message}`); }
+  return false;
+}
 function renderLifecycleProgress(msg) {
   const lifecycle = msg.lifecycle || {};
   const operation = msg.operation || lifecycle.operation || {};
@@ -160,7 +171,7 @@ function connectInput(takeover=false) {
     publishMenuState();
     fetchTaskCatalog();
     const available = window.isSecureContext && navigator.xr && await navigator.xr.isSessionSupported('immersive-vr');
-    document.querySelector('#enter').disabled = !available;
+    document.querySelector('#enter').disabled = !available || !vrSelected;
     if (!available && !debugMode) show('当前浏览器没有可用的 immersive-vr 会话。');
   };
   input.onmessage = event => {
@@ -203,6 +214,7 @@ function connectVideo() {
       }
       lastEnvEpoch = msg.env_epoch;
       latestStatus = msg;
+      vrSelected = msg.control_mode === 'vr';
       renderLifecycleProgress(msg);
       statusReceivedAt = performance.now();
       panelDirty = true;
@@ -692,8 +704,9 @@ function startDesktopDebug() {
   show('桌面调试模式已启动。这是模拟输入，不代表 Meta Quest / WebXR 已验证。');
   debugAnimation=requestAnimationFrame(desktopDebugFrame);
 }
-function requestDesktopDebug() {
+async function requestDesktopDebug() {
   if (session) { show('请先退出真实 VR 会话，再启动桌面调试模式。'); return; }
+  if (!await selectMode('vr')) return;
   pendingDebugStart=true;
   if (inputReconnectTimer) { clearTimeout(inputReconnectTimer); inputReconnectTimer=null; }
   if (input) {
@@ -755,6 +768,7 @@ function frame(time, xrFrame) {
 
 document.querySelector('#enter').onclick = async () => {
   try {
+    if (!vrSelected) { show('请先选择 VR 双手柄入口。'); return; }
     stopDesktopDebug();
     previousButtons = {};
     session = await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor']});
@@ -769,6 +783,17 @@ document.querySelector('#enter').onclick = async () => {
     session.addEventListener('end',() => {sendNeutral();previousButtons={};session=null;});
     setupGL(); sendNeutral(); session.requestAnimationFrame(frame);
   } catch(error) { console.error(error); show('无法进入 VR，请确认头显浏览器已允许 WebXR，然后刷新页面重试。'); if(session) await session.end(); session=null; }
+};
+document.querySelector('#vr-select').onclick = async () => {
+  if (!await selectMode('vr')) return;
+  vrSelected = true;
+  show('已选择 VR 双手柄；请点击“进入 VR”。');
+  if (window.isSecureContext && navigator.xr &&
+      await navigator.xr.isSessionSupported('immersive-vr')) document.querySelector('#enter').disabled=false;
+};
+document.querySelector('#leader-entry').onclick = async () => {
+  if (!await selectMode('leader')) return;
+  location.href = `/spectator#${new URLSearchParams({token})}`;
 };
 document.querySelector('#debug').onclick = () => {
   if (debugMode) stopDesktopDebug();

@@ -14,13 +14,15 @@ h1{font-size:28px}button,select,.button-link{font:inherit;padding:12px 20px;bord
 progress{display:block;width:100%;height:16px;margin-top:10px;accent-color:#73e5b3}
 </style>
 <h1>RoboDojo · VR 数采</h1>
+<div class="panel"><b>选择控制入口（一次只能使用一种）</b><p>VR 双手柄与实体双主臂互斥；监看页会显示当前模式。录制中不能切换。</p>
+<button id="leader-entry">选择实体双主臂 → 打开 PC 监看</button></div>
 <div class="panel prompt"><b>当前任务 Prompt</b><p id="active-prompt">等待任务信息…</p></div>
 <div class="panel" id="lifecycle-progress"><div class="lifecycle-head"><b>空间重建进度</b><span id="lifecycle-label">等待服务状态…</span></div><progress id="lifecycle-bar" max="100" value="0"></progress></div>
 <div class="panel"><b>Meta Touch / Pico 手柄按键</b>
 <p>双手侧握键：按住时移动对应机械臂，松开后机械臂保持；首次进入、重连或重新对齐后，必须先松开双手侧握键一次。</p>
 <p>双手扳机：控制对应夹爪开合。左 X：开始录制；左 Y：保存录制；右 A：双臂复位到初始位；右 B：重置当前场景。</p>
 <p>按下任一摇杆：打开或关闭 VR 菜单。菜单内用摇杆上下选择、扳机确认、右 B 返回；任务切换、官方布局轮换、错误恢复、删除轨迹和退出页面都在菜单内。</p></div>
-<button id="enter" disabled>进入 VR</button>
+<button id="vr-select">选择 VR 双手柄</button><button id="enter" disabled>进入 VR</button>
 <button id="debug">桌面调试模式</button>
 <a id="spectator-link" class="button-link" href="/spectator" target="_blank" rel="noopener">打开 PC 监看页面</a>
 <div id="debug-help" class="panel" hidden><b>桌面模拟 VR 输入（不代表 Meta Quest / WebXR 已验证）</b>

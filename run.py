@@ -22,8 +22,8 @@ TASK_SWITCH_EXIT = 75
 SUPPORT_MOTION_GATED_TASKS = {
     "imitate_sorting_sequence", "make_kong", "play_tic_tac_toe",
 }
-FULL_SIM_GATED_TASKS = {"match_and_pick_from_conveyor", "pick_from_conveyor_by_image"}
-RECORDING_GATED_TASKS = SUPPORT_MOTION_GATED_TASKS | FULL_SIM_GATED_TASKS
+CONVEYOR_TASKS = {"match_and_pick_from_conveyor", "pick_from_conveyor_by_image"}
+RECORDING_GATED_TASKS = SUPPORT_MOTION_GATED_TASKS | CONVEYOR_TASKS
 
 
 def available_tasks(root):
@@ -358,6 +358,7 @@ def main():
     recorder = None
     retiring_recorder = None
     preview_encoder = None
+    observer_encoder = None
     restart_task = None
     try:
         if args.smoke_steps:
@@ -370,6 +371,7 @@ def main():
                                episode_path, inspect_episode, list_episodes, read_snapshot)
         from robodojo import RoboDojo
         preview_encoder = PreviewEncoder(bridge.publish_image)
+        observer_encoder = PreviewEncoder(bridge.publish_observer)
 
         def create_runtime(task, selected_layout, seed):
             candidate = None
@@ -461,18 +463,31 @@ def main():
                 operation_id = command.get("operation_id") if isinstance(command, dict) else None
                 if operation_id:
                     bridge.update_operation(operation_id, "running", "validating")
+                physical_record = name == "physical_record_toggle"
+                if physical_record:
+                    if input_status.get("control_mode") != "leader":
+                        message = "实体输入模式已退出，录制命令未执行。"
+                        continue
+                    name = "record" if recorder is None else "save"
                 if name == "record" and recorder is None:
-                    if retiring_recorder is not None and retiring_recorder.thread.is_alive():
+                    if physical_record and (input_status.get("active_source") != "leader-can" or
+                                            not all(bridge.leader.status()["ready"].values())):
+                        message = "实体双主臂尚未同时就绪，无法开始录制。"
+                    elif retiring_recorder is not None and retiring_recorder.thread.is_alive():
                         message = "上一次录制写入正在受控结束，请稍后再开始。"
                     else:
                         retiring_recorder = None
                         recording_metadata = dict(metadata, recording_start_tick=backend.ticks)
+                        if physical_record:
+                            recording_metadata["require_dual_controller_input"] = True
                         if input_status.get("active_source") == "desktop-debug":
                             recording_metadata["collection_purpose"] = "integration_check"
                         recorder = AsyncRecorder(args.output, recording_metadata, observation)
                         message = "正在录制普通示范。"
                 elif name == "record_recovery" and recorder is None:
-                    if retiring_recorder is not None and retiring_recorder.thread.is_alive():
+                    if input_status.get("active_source") == "leader-can":
+                        message = "实体模式请用键盘空格开始普通录制。"
+                    elif retiring_recorder is not None and retiring_recorder.thread.is_alive():
                         message = "上一次录制写入正在受控结束，请稍后再开始。"
                     else:
                         retiring_recorder = None
@@ -728,12 +743,9 @@ def main():
                 input_status["applied_seq"] = packet["seq"]
                 applied_seq = packet["seq"]
             task_motion_waiting = args.task in RECORDING_GATED_TASKS and recorder is None
-            full_sim_waiting = args.task in FULL_SIM_GATED_TASKS and recorder is None
             task_motion_enabled = not task_motion_waiting
-            if full_sim_waiting:
-                next_observation = backend.observation()
-                control_ms = (time.monotonic() - control_start) * 1000
-            elif homing:
+            backend.set_task_motion_enabled(task_motion_enabled)
+            if homing:
                 last_command, home_complete, home_error = backend.home_step(
                     task_motion_enabled=task_motion_enabled)
                 homing_steps += 1
@@ -746,19 +758,23 @@ def main():
                     controller.stop("arm_home_timeout", paused=True)
                     message = f"双臂复位超时，最大关节误差 {home_error:.3f} rad；请检查碰撞后重试。"
             else:
+                if (input_status.get("control_mode") == "leader" and packet is not None and
+                        all(bridge.leader.status()["ready"].values()) and
+                        (controller.teleop_paused or controller.require_release)):
+                    controller.reanchor()
                 targets, grippers = controller.targets(
                     packet, backend.poses(), transient_gap=transient_gap)
                 last_command = backend.step(
                     targets, grippers, task_motion_enabled=task_motion_enabled)
-            if not full_sim_waiting:
-                control_ms = (time.monotonic() - control_start) * 1000
-                next_observation = backend.observation()
+            control_ms = (time.monotonic() - control_start) * 1000
+            next_observation = backend.observation()
             record_enqueue_ms = 0.
             if recorder is not None:
                 record_start = time.monotonic()
                 try:
                     recorder.append(observation, next_observation, last_command, packet,
-                                    (backend.ticks - 1) * .04, tick_start)
+                                    (backend.ticks - 1 - recorder.recorder.metadata.get(
+                                        "recording_start_tick", 0)) * .04, tick_start)
                 except RecorderBackpressure as error:
                     log.error("Recording stopped by explicit backpressure: %s", error)
                     retiring_recorder, recorder = recorder, None
@@ -791,6 +807,8 @@ def main():
                       "task_motion": ("waiting_for_recording" if task_motion_waiting else
                                       "recording_active" if args.task in RECORDING_GATED_TASKS else
                                       "not_gated"),
+                      "conveyor_surface_enabled": (backend.conveyor_surface.GetSurfaceVelocityEnabledAttr().Get()
+                                                   if backend.conveyor_surface is not None else None),
                       "control_ms": round(control_ms, 1),
                       "record_enqueue_ms": round(record_enqueue_ms, 1),
                       "recording_writer": recorder_status,
@@ -801,8 +819,10 @@ def main():
                       "step_profile": backend.last_step_profile}
             preview_start = time.monotonic()
             preview_encoder.submit(preview_mosaic(observation["vision"]))
+            observer_encoder.submit(np.ascontiguousarray(backend.top_frame[::2, ::2]))
             status["preview_enqueue_ms"] = round((time.monotonic() - preview_start) * 1000, 1)
             status["preview"] = preview_encoder.diagnostics()
+            status["observer_preview"] = observer_encoder.diagnostics()
             compute_ms = (time.monotonic() - tick_start) * 1000
             cycle_ms = period_ms if period_ms is not None else compute_ms
             cycle_samples.append(cycle_ms)
@@ -868,6 +888,8 @@ def main():
             progress.update("shutdown_app_exit")
         if preview_encoder is not None:
             preview_encoder.close()
+        if observer_encoder is not None:
+            observer_encoder.close()
         server.close()
     if restart_task is not None:
         return TASK_SWITCH_EXIT

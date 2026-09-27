@@ -122,6 +122,12 @@ class Controller:
     def pause(self):
         self.stop("teleop_paused", paused=True)
 
+    def reanchor(self):
+        for clutch in self.clutches.values():
+            clutch.release()
+        self.require_release = False
+        self.teleop_paused = False
+
     def targets(self, packet, poses, transient_gap=False):
         if packet is None:
             if not transient_gap:

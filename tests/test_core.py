@@ -23,7 +23,7 @@ from recording import (AsyncRecorder, CAMERAS, Recorder, RecorderBackpressure,
                        read_snapshot)
 from robodojo import RoboDojo
 from server import Bridge, create_app, parse_command
-from run import (FULL_SIM_GATED_TASKS, RECORDING_GATED_TASKS,
+from run import (CONVEYOR_TASKS, RECORDING_GATED_TASKS,
                  SUPPORT_MOTION_GATED_TASKS, available_tasks, load_scene_state, preview_mosaic,
                  select_task_layout, task_catalog,
                  task_identity, task_runtime_device)
@@ -145,6 +145,27 @@ def test_preview_mosaic_keeps_head_and_places_wrist_views_at_the_sides():
     np.testing.assert_array_equal(image[240:480, 960:], obs["vision"]["cam_right_wrist"]["color"][::2, ::2])
 
 
+def test_observer_stream_is_separate_and_cleared_on_scene_change():
+    async def scenario():
+        bridge = Bridge()
+        runner = web.AppRunner(create_app(bridge, "test-token"))
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with aiohttp.ClientSession() as client:
+                async with client.ws_connect(f"http://127.0.0.1:{port}/observer?token=test-token") as ws:
+                    bridge.publish_observer(b"observer-jpeg")
+                    assert (await ws.receive(timeout=2)).data == b"observer-jpeg"
+                    assert bridge.image is None
+                    bridge.reset_epoch(1)
+                    assert bridge.observer_image is None
+        finally:
+            await runner.cleanup()
+    asyncio.run(scenario())
+
+
 def test_random_scene_state_selects_an_official_seeded_layout(tmp_path):
     layouts = tmp_path / "Assets/Eval_Layout/RoboDojo/arx_x5/0"
     layouts.mkdir(parents=True)
@@ -250,6 +271,22 @@ def test_missing_controller_packet_is_reported_without_rejecting_episode(tmp_pat
         assert file.attrs["quality_pass"]
         assert file.attrs["controller_input_missing_transition_count"] == 1
         assert file.attrs["controller_input_valid_transition_count"] == 2
+
+
+def test_physical_recording_rejects_missing_dual_controller_input(tmp_path):
+    metadata = {"task": "stack_blocks", "embodiment": "arx_x5",
+                "require_dual_controller_input": True}
+    command = {"left_arm_joint_states": np.ones(6)}
+    recorder = Recorder(tmp_path, metadata, observation(0))
+    recorder.append(observation(0), observation(1), command, packet(), 0., 100.)
+    recorder.append(observation(1), observation(2), command, None, .04, 100.05)
+
+    path = recorder.finish(True, "operator_save")
+
+    assert path.relative_to(tmp_path).parts[:2] == ("rejected", "stack_blocks")
+    with h5py.File(path) as file:
+        assert not file.attrs["quality_pass"]
+        assert "missing controller input" in file.attrs["quality_reason"]
 
 
 def test_recorder_skips_an_orphaned_partial_episode_id(tmp_path):
@@ -365,6 +402,7 @@ def test_recovery_snapshot_listing_and_exact_delete(tmp_path):
 def test_transport_auth_multiple_idle_clients_stale_input_and_independent_video():
     async def scenario():
         bridge = Bridge()
+        bridge.select_mode("vr")
         app = create_app(bridge, "test-token")
         runner = web.AppRunner(app)
         await runner.setup()
@@ -400,6 +438,8 @@ def test_transport_auth_multiple_idle_clients_stale_input_and_independent_video(
                     assert 'id="fullscreen-button"' in spectator_page
                     assert 'id="fullscreen-hud"' in spectator_page
                     assert 'id="quality-panel"' in spectator_page
+                    assert 'id="top-observer"' in spectator_page
+                    assert 'id="leader-start"' in spectator_page
                 async with client.get(base + '/spectator.js') as response:
                     assert response.status == 200 and 'javascript' in response.content_type
                     spectator_js = await response.text()
@@ -407,6 +447,7 @@ def test_transport_auth_multiple_idle_clients_stale_input_and_independent_video(
                     assert 'requestFullscreen()' in spectator_js
                     assert 'fullscreenRecordingElement' in spectator_js
                     assert 'function renderQuality' in spectator_js
+                    assert 'function connectTopObserver' in spectator_js
                 async with client.ws_connect(base + '/input?token=test-token') as ws:
                     observer = await client.ws_connect(base + '/input?token=test-token')
                     assert len(bridge.clients) == 2 and bridge.owner is None
@@ -515,6 +556,7 @@ def test_portable_launcher_opens_authorized_quest_page():
 def test_desktop_debug_can_take_over_input_owner():
     async def scenario():
         bridge = Bridge()
+        bridge.select_mode("vr")
         app = create_app(bridge, "test-token")
         runner = web.AppRunner(app)
         await runner.setup()
@@ -588,9 +630,38 @@ def test_available_tasks_keeps_scripted_support_arm_tasks(tmp_path):
 def test_automatic_motion_tasks_are_recording_gated():
     assert SUPPORT_MOTION_GATED_TASKS == {
         "imitate_sorting_sequence", "make_kong", "play_tic_tac_toe"}
-    assert FULL_SIM_GATED_TASKS == {
+    assert CONVEYOR_TASKS == {
         "match_and_pick_from_conveyor", "pick_from_conveyor_by_image"}
-    assert RECORDING_GATED_TASKS == SUPPORT_MOTION_GATED_TASKS | FULL_SIM_GATED_TASKS
+    assert RECORDING_GATED_TASKS == SUPPORT_MOTION_GATED_TASKS | CONVEYOR_TASKS
+
+
+def test_conveyor_surface_and_graph_follow_recording_gate():
+    class Attribute:
+        def __init__(self):
+            self.value = False
+
+        def Get(self):
+            return self.value
+
+        def Set(self, value):
+            self.value = value
+
+    class Surface:
+        def __init__(self):
+            self.attribute = Attribute()
+
+        def GetSurfaceVelocityEnabledAttr(self):
+            return self.attribute
+
+    backend = RoboDojo.__new__(RoboDojo)
+    backend.conveyor_surface = Surface()
+    backend.conveyor_node_enabled = Attribute()
+    backend.set_task_motion_enabled(True)
+    assert backend.conveyor_surface.attribute.value is True
+    assert backend.conveyor_node_enabled.value is True
+    backend.set_task_motion_enabled(False)
+    assert backend.conveyor_surface.attribute.value is False
+    assert backend.conveyor_node_enabled.value is False
 
 
 def test_all_tasks_have_chinese_prompts_and_dynamic_values_are_preserved():
